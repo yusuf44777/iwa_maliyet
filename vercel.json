@@ -3,7 +3,9 @@
   "outputDirectory": "frontend/dist",
   "functions": {
     "api/index.py": {
-      "includeFiles": "backend/**"
+      "includeFiles": "backend/**",
+      "runtime": "@vercel/python@4",
+      "maxDuration": 30
     }
   },
   "rewrites": [
