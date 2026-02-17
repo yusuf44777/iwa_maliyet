@@ -1,0 +1,11 @@
+# Vercel Python Runtime Dependencies
+# Bu dosya Vercel deployment için gereklidir.
+# Lokal geliştirme için backend/requirements.txt kullanın.
+
+fastapi==0.115.6
+openpyxl==3.1.5
+pandas==2.2.3
+pydantic==2.10.4
+python-multipart==0.0.20
+aiofiles==24.1.0
+psycopg2-binary==2.9.10

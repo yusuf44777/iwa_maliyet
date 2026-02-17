@@ -56,7 +56,7 @@ Varsayilan local URL'ler:
 
 Temel alanlar:
 - `APP_ENV=development|production`
-- `DATABASE_URL=` (PostgreSQL icin production'da zorunlu)
+- `DATABASE_URL=` (PostgreSQL icin production'da zorunlu, Supabase URI kullanabilirsiniz)
 - `AUTH_SECRET=` (production'da guclu ve min 32 karakter)
 - `CORS_ORIGINS=https://app.example.com`
 - `ENABLE_RELOAD_DB=false`
@@ -67,6 +67,8 @@ Temel alanlar:
 ### Frontend (`frontend/.env`)
 
 - `VITE_API_URL=` (backend ayri hostsa tam API base URL)
+- `VITE_SUPABASE_URL=` (Supabase project URL)
+- `VITE_SUPABASE_PUBLISHABLE_DEFAULT_KEY=` (Supabase publishable key)
 - `VITE_SHOW_DEFAULT_LOGIN_HINTS=false`
 - `VITE_ENABLE_RELOAD_DB=false`
 

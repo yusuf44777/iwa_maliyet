@@ -26,3 +26,6 @@ exports/
 # Logs/temp
 *.log
 *.tmp
+
+# Vercel
+.vercel/
