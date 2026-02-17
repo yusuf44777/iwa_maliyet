@@ -18,6 +18,3 @@ if os.path.isdir(_backend_dir):
 
 # FastAPI app'i import et – Vercel Python runtime "app" adını otomatik tanır
 from main import app  # noqa: E402, F401
-
-# Vercel handler (bazı runtime sürümleri 'handler' adını da arar)
-handler = app
