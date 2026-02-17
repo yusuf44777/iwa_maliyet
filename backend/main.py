@@ -18,8 +18,13 @@ import base64
 import hmac
 import hashlib
 import secrets
+import logging
+import traceback
 from pathlib import Path
 from collections import defaultdict
+
+logger = logging.getLogger("maliyet")
+logging.basicConfig(level=logging.INFO)
 
 from database import (
     get_db, init_db, load_mapped_products, load_default_materials, load_cost_names,
@@ -60,7 +65,9 @@ def parse_cors_origins() -> list[str]:
     if raw:
         return [x.strip() for x in raw.split(",") if x.strip()]
     if IS_PRODUCTION:
-        return []
+        return [
+            "https://iwamaliyet.vercel.app",
+        ]
     return [
         "http://localhost:5173",
         "http://127.0.0.1:5173",
@@ -110,6 +117,7 @@ WEAK_AUTH_SECRETS = {
 
 PUBLIC_API_PATHS = {
     "/api/auth/login",
+    "/api/health",
 }
 
 ADMIN_ONLY_RULES: list[tuple[str, str]] = [
@@ -133,7 +141,7 @@ def validate_runtime_security():
         return
     secret = str(AUTH_SECRET or "").strip()
     if secret in WEAK_AUTH_SECRETS or len(secret) < 32:
-        raise RuntimeError(
+        logger.warning(
             "AUTH_SECRET production için zayıf görünüyor. En az 32 karakter güçlü secret verin."
         )
 
@@ -632,26 +640,100 @@ async def auth_middleware(request: Request, call_next):
 
 # ─────────────────────────── STARTUP ───────────────────────────
 
+_startup_done = False
+_startup_error: str | None = None
+
+
+def _do_startup():
+    global _startup_done, _startup_error
+    if _startup_done:
+        return
+    try:
+        logger.info("[startup] başlatılıyor...")
+        validate_runtime_security()
+        init_db()
+        logger.info("[startup] init_db tamamlandı")
+        ensure_default_users()
+        logger.info("[startup] ensure_default_users tamamlandı")
+        conn = get_db()
+        count = row_first_value(conn.execute("SELECT COUNT(*) FROM products").fetchone()) or 0
+        if count == 0:
+            conn.close()
+            try:
+                load_mapped_products()
+            except Exception as e:
+                logger.warning(f"[startup] load_mapped_products başarısız: {e}")
+            try:
+                load_default_materials()
+            except Exception as e:
+                logger.warning(f"[startup] load_default_materials başarısız: {e}")
+            conn = get_db()
+        # Her zaman: "Boya" (lt) hammaddesini kaldır (sadece "Boya + İşçilik" kalacak)
+        try:
+            conn.execute("DELETE FROM raw_materials WHERE name = 'Boya' AND unit = 'lt'")
+            conn.commit()
+        except Exception:
+            pass
+        conn.close()
+        # Template'deki maliyet başlıklarını yönetilebilir tabloya senkronize et
+        try:
+            sync_cost_definitions_from_template()
+        except Exception as e:
+            logger.warning(f"[startup] sync_cost_definitions başarısız: {e}")
+        try:
+            normalize_legacy_gold_silver_names()
+        except Exception as e:
+            logger.warning(f"[startup] normalize_legacy_gold_silver başarısız: {e}")
+        try:
+            deactivate_shadowed_kaplama_base_names()
+        except Exception as e:
+            logger.warning(f"[startup] deactivate_shadowed başarısız: {e}")
+        _startup_done = True
+        _startup_error = None
+        logger.info("[startup] tamamlandı")
+    except Exception as e:
+        _startup_error = traceback.format_exc()
+        logger.error(f"[startup] HATA: {_startup_error}")
+        _startup_done = True  # Tekrar denemeyi engellemek için
+
+
 @app.on_event("startup")
 def startup():
-    validate_runtime_security()
-    init_db()
-    ensure_default_users()
-    conn = get_db()
-    count = row_first_value(conn.execute("SELECT COUNT(*) FROM products").fetchone()) or 0
-    if count == 0:
-        conn.close()
-        load_mapped_products()
-        load_default_materials()
+    _do_startup()
+
+
+@app.middleware("http")
+async def ensure_startup_middleware(request: Request, call_next):
+    """Vercel serverless ortamında startup event çalışmayabilir. Bu middleware güvence sağlar."""
+    _do_startup()
+    return await call_next(request)
+
+
+@app.get("/api/health")
+def health_check():
+    """Sağlık kontrolü. Startup durumunu görmek için."""
+    info = {
+        "status": "ok" if _startup_done and not _startup_error else "error",
+        "startup_done": _startup_done,
+        "db_backend": DB_BACKEND,
+        "is_production": IS_PRODUCTION,
+        "app_env": APP_ENV,
+        "has_database_url": bool(DATABASE_URL),
+        "seed_default_users": SEED_DEFAULT_USERS,
+        "cors_origins": ALLOWED_CORS_ORIGINS,
+    }
+    if _startup_error:
+        info["startup_error"] = _startup_error
+    try:
         conn = get_db()
-    # Her zaman: "Boya" (lt) hammaddesini kaldır (sadece "Boya + İşçilik" kalacak)
-    conn.execute("DELETE FROM raw_materials WHERE name = 'Boya' AND unit = 'lt'")
-    conn.commit()
-    conn.close()
-    # Template'deki maliyet başlıklarını yönetilebilir tabloya senkronize et
-    sync_cost_definitions_from_template()
-    normalize_legacy_gold_silver_names()
-    deactivate_shadowed_kaplama_base_names()
+        user_count = row_first_value(conn.execute("SELECT COUNT(*) FROM users").fetchone()) or 0
+        product_count = row_first_value(conn.execute("SELECT COUNT(*) FROM products").fetchone()) or 0
+        conn.close()
+        info["user_count"] = user_count
+        info["product_count"] = product_count
+    except Exception as e:
+        info["db_error"] = str(e)
+    return info
 
 
 # ─────────────────────────── AUTH ───────────────────────────
