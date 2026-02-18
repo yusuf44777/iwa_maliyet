@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getProducts, getProductGroups, exportExcel } from '../api';
+import { CATEGORY_OPTIONS, getCategoryBadgeClass } from '../categoryUtils';
 import toast from 'react-hot-toast';
 import {
   Search, ChevronLeft, ChevronRight, Filter, Download,
@@ -131,8 +132,9 @@ export default function ProductBrowser({ onSelectProduct, onRefresh }) {
               className="px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
             >
               <option value="">Tümü</option>
-              <option value="metal">Metal</option>
-              <option value="ahsap">Ahşap</option>
+              {CATEGORY_OPTIONS.map((cat) => (
+                <option key={cat.value} value={cat.value}>{cat.label}</option>
+              ))}
             </select>
           </div>
 
@@ -208,7 +210,7 @@ export default function ProductBrowser({ onSelectProduct, onRefresh }) {
                     <td className="font-mono font-medium">{g.product_identifier}</td>
                     <td className="max-w-xs truncate">{g.parent_name}</td>
                     <td>
-                      <span className={`badge ${g.kategori === 'metal' ? 'badge-metal' : 'badge-ahsap'}`}>
+                      <span className={`badge ${getCategoryBadgeClass(g.kategori)}`}>
                         {g.kategori}
                       </span>
                     </td>
@@ -298,7 +300,7 @@ export default function ProductBrowser({ onSelectProduct, onRefresh }) {
                         <td className="font-mono text-xs">{p.child_sku}</td>
                         <td className="max-w-xs truncate">{p.child_name}</td>
                         <td>
-                          <span className={`badge ${p.kategori === 'metal' ? 'badge-metal' : 'badge-ahsap'}`}>
+                          <span className={`badge ${getCategoryBadgeClass(p.kategori)}`}>
                             {p.kategori}
                           </span>
                         </td>

@@ -102,6 +102,11 @@ class ParentInheritanceRequest(BaseModel):
     mdf_material_id: Optional[int] = None  # Seçilen MDF (id), miktar = Alan
 
 
+class ProductSyncRequest(BaseModel):
+    categories: list[str] = Field(default_factory=list)  # boş ise tüm kategoriler
+    replace_existing: bool = True  # true ise seçili kategorilerdeki ürünleri yeniden oluşturur
+
+
 class AuthLoginRequest(BaseModel):
     username: str
     password: str

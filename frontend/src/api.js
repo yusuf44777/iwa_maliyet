@@ -112,5 +112,6 @@ export const getTemplateStructure = () => api.get('/template-structure').then(r 
 
 // ─── DB Management ───
 export const reloadDB = () => api.post('/reload-db').then(r => r.data);
+export const syncProducts = (data) => api.post('/sync-products', data).then(r => r.data);
 
 export default api;

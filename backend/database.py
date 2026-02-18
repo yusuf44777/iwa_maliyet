@@ -103,13 +103,24 @@ def close_pg_pool():
         pool.closeall()
 
 
-KATEGORI_ROOT = Path(__file__).parent.parent.parent  # kategori_calismasi root
+PROJECT_ROOT = Path(__file__).resolve().parent.parent  # maliyet_programı root
+KATEGORI_ROOT = PROJECT_ROOT.parent  # kategori_calismasi root
 
 KATEGORI_DIRS = {
     "metal": KATEGORI_ROOT / "metal_kategori",
     "ahsap": KATEGORI_ROOT / "ahsap_kategori",
     "cam": KATEGORI_ROOT / "cam_kategori",
     "harita": KATEGORI_ROOT / "harita_kategori",
+    "mobilya": KATEGORI_ROOT / "mobilya_kategori",
+}
+
+KATEGORI_ALIASES = {
+    "ahsap": "ahsap",
+    "ahşap": "ahsap",
+    "mobilya": "mobilya",
+    "metal": "metal",
+    "cam": "cam",
+    "harita": "harita",
 }
 
 
@@ -135,6 +146,39 @@ INSERT_OR_IGNORE_PATTERN = re.compile(r"^\s*INSERT\s+OR\s+IGNORE\s+INTO\s+", re.
 
 def is_postgres_backend() -> bool:
     return IS_POSTGRES
+
+
+def get_supported_categories() -> list[str]:
+    return list(KATEGORI_DIRS.keys())
+
+
+def normalize_product_categories(categories: list[str] | None = None) -> list[str]:
+    """
+    Girilen kategori listesini normalize eder ve desteklenenleri döndürür.
+    Boş gelirse tüm kategoriler döner.
+    """
+    if not categories:
+        return get_supported_categories()
+
+    out: list[str] = []
+    seen: set[str] = set()
+    invalid: list[str] = []
+
+    for raw in categories:
+        key = str(raw or "").strip().lower()
+        normalized = KATEGORI_ALIASES.get(key, key)
+        if normalized not in KATEGORI_DIRS:
+            invalid.append(str(raw))
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        out.append(normalized)
+
+    if invalid:
+        supported = ", ".join(get_supported_categories())
+        raise ValueError(f"Desteklenmeyen kategori(ler): {', '.join(invalid)}. Desteklenenler: {supported}")
+    return out
 
 
 def adapt_sql_for_backend(sql: str) -> str:
@@ -512,25 +556,77 @@ def init_db():
     conn.close()
 
 
-def load_mapped_products():
-    """Tüm kategorilerdeki mapped_products.csv dosyalarını DB'ye yükler."""
+def _resolve_kategori_csv_path(kategori_name: str, kategori_dir: Path) -> Path | None:
+    env_key = f"KATEGORI_{kategori_name.upper()}_CSV_PATH"
+    env_value = os.getenv(env_key, "").strip()
+    candidates: list[Path] = []
+
+    if env_value:
+        if is_http_url(env_value):
+            cached = cache_remote_file(
+                env_value,
+                cache_name=f"{kategori_name}_mapped_products.csv",
+                ttl_seconds=int(os.getenv("REMOTE_FILE_CACHE_TTL", "900")),
+            )
+            if cached and cached.exists():
+                return cached
+        else:
+            candidates.append(Path(env_value).expanduser())
+
+    candidates.extend([
+        PROJECT_ROOT / f"{kategori_name}_kategori_list.csv",
+        PROJECT_ROOT / f"{kategori_name}_mapping_result.csv",
+        kategori_dir / f"{kategori_name}_kategori_list.csv",
+        kategori_dir / "mapped_products.csv",
+        kategori_dir / f"{kategori_name}_mapping_result.csv",
+    ])
+
+    if kategori_name == "cam":
+        candidates.append(kategori_dir / "glass_mapping_result.csv")
+    if kategori_name == "harita":
+        candidates.append(kategori_dir / "harita_mapping_result.csv")
+
+    deduped: list[Path] = []
+    seen = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(path)
+
+    return next((p for p in deduped if p.exists()), None)
+
+
+def load_mapped_products(categories: list[str] | None = None, replace_existing: bool = False):
+    """
+    mapped product listelerini DB'ye yükler.
+    - categories: sadece seçili kategorileri güncelle
+    - replace_existing: true ise seçili kategorilerdeki eski ürünleri temizleyip yeniden yükle
+    """
+    selected_categories = normalize_product_categories(categories)
     conn = get_db()
     cursor = conn.cursor()
 
+    if replace_existing:
+        for kategori_name in selected_categories:
+            cursor.execute(
+                "DELETE FROM product_materials WHERE child_sku IN (SELECT child_sku FROM products WHERE kategori = ?)",
+                (kategori_name,),
+            )
+            cursor.execute(
+                "DELETE FROM product_costs WHERE child_sku IN (SELECT child_sku FROM products WHERE kategori = ?)",
+                (kategori_name,),
+            )
+            cursor.execute("DELETE FROM products WHERE kategori = ?", (kategori_name,))
+
     total_loaded = 0
 
-    for kategori_name, kategori_dir in KATEGORI_DIRS.items():
-        # Prefer curated kategori_list exports when available (e.g. ahsap_kategori_list.csv)
-        candidates = [
-            kategori_dir / f"{kategori_name}_kategori_list.csv",
-            kategori_dir / "mapped_products.csv",
-            kategori_dir / f"{kategori_name}_mapping_result.csv",
-            kategori_dir / "glass_mapping_result.csv",
-            kategori_dir / "harita_mapping_result.csv",
-        ]
-        csv_path = next((p for p in candidates if p.exists()), candidates[-1])
-        if not csv_path.exists():
-            print(f"⚠ {csv_path} bulunamadı, atlanıyor.")
+    for kategori_name in selected_categories:
+        kategori_dir = KATEGORI_DIRS[kategori_name]
+        csv_path = _resolve_kategori_csv_path(kategori_name, kategori_dir)
+        if csv_path is None:
+            print(f"⚠ {kategori_name}: CSV bulunamadı, atlanıyor.")
             continue
 
         if pd is not None:

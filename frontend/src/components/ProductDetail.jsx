@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getProduct, getMaterials, setProductMaterial, setProductMaterialBulk, setProductCost, getCostNames, exportExcel, getProducts } from '../api';
+import { getCategoryBadgeClass } from '../categoryUtils';
 import toast from 'react-hot-toast';
 import {
   ArrowLeft, Package, Ruler, Square, Palette, Save,
@@ -176,7 +177,7 @@ export default function ProductDetail({ sku, onBack, onRefresh }) {
             </div>
             <div className="flex items-center gap-4 text-sm text-gray-500">
               <span className="font-mono">{product.child_sku}</span>
-              <span className={`badge ${product.kategori === 'metal' ? 'badge-metal' : 'badge-ahsap'}`}>
+              <span className={`badge ${getCategoryBadgeClass(product.kategori)}`}>
                 {product.kategori}
               </span>
               <span className="font-mono">{product.child_code}</span>

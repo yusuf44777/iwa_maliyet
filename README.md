@@ -61,9 +61,11 @@ Temel alanlar:
 - `AUTH_SECRET=` (production'da guclu ve min 32 karakter)
 - `CORS_ORIGINS=https://app.example.com`
 - `ENABLE_RELOAD_DB=false`
+- `ENABLE_PRODUCT_SYNC=true` (kategori bazli parent-child guncelleme endpointi)
 - `SEED_DEFAULT_USERS=false`
 - `TEMPLATE_PATH` / `TEMPLATE_URL`
 - `KARGO_CSV_PATH` / `KARGO_CSV_URL`
+- `KATEGORI_METAL_CSV_PATH`, `KATEGORI_AHSAP_CSV_PATH`, `KATEGORI_CAM_CSV_PATH`, `KATEGORI_HARITA_CSV_PATH`, `KATEGORI_MOBILYA_CSV_PATH` (opsiyonel CSV override)
 
 ### Frontend (`frontend/.env`)
 
@@ -90,6 +92,21 @@ Opsiyonel farkli SQLite dosyasi:
 ```bash
 python migrate_sqlite_to_postgres.py /path/to/maliyet.db
 ```
+
+## Parent-Child Liste Guncelleme
+
+CSV'leri guncelleyip tum veritabaniyi sifirlamadan sadece secili kategorileri yenileyebilirsiniz:
+
+```bash
+curl -X POST "$API_BASE/api/sync-products" \
+  -H "Authorization: Bearer <ADMIN_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"categories":["metal","ahsap","cam","harita","mobilya"],"replace_existing":true}'
+```
+
+- `categories` bos birakilirsa tum desteklenen kategoriler senkronize edilir.
+- `replace_existing=true` secili kategorilerin eski urunlerini silip CSV'den yeniden yukler.
+- `mobilya` kategorisi desteklenir.
 
 ## Production Notlari
 

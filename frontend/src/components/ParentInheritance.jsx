@@ -3,6 +3,7 @@ import {
   getProductGroups, getProducts, getMaterials, getCostDefinitions,
   getKargoOptions, getKaplamaNameSuggestions, applyInheritance, exportExcel, getInheritancePrefill,
 } from '../api';
+import { CATEGORY_OPTIONS, getCategoryBadgeClass } from '../categoryUtils';
 import toast from 'react-hot-toast';
 import {
   Search, ChevronDown, ChevronRight, GitBranch, Hammer,
@@ -652,8 +653,9 @@ export default function ParentInheritance({ onRefresh }) {
               className="px-3 py-1.5 border border-gray-200 rounded-lg text-sm"
             >
               <option value="">Tüm Kategoriler</option>
-              <option value="metal">Metal</option>
-              <option value="ahsap">Ahşap</option>
+              {CATEGORY_OPTIONS.map((cat) => (
+                <option key={cat.value} value={cat.value}>{cat.label}</option>
+              ))}
             </select>
             <div className="relative">
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
@@ -715,7 +717,7 @@ export default function ParentInheritance({ onRefresh }) {
                     ? <ChevronDown className="w-4 h-4 text-gray-400" />
                     : <ChevronRight className="w-4 h-4 text-gray-400" />}
                   <span className="font-medium text-gray-800 flex-1 truncate">{g.parent_name || '(isimsiz)'}</span>
-                  <span className={`badge ${g.kategori === 'metal' ? 'badge-metal' : 'badge-ahsap'}`}>{g.kategori}</span>
+                  <span className={`badge ${getCategoryBadgeClass(g.kategori)}`}>{g.kategori}</span>
                   <span className="text-xs text-gray-500">{g.sub_group_count} grp</span>
                   <span className="text-xs text-gray-400">{g.variant_count} ürün</span>
                   {g.min_alan != null && (

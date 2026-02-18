@@ -41,6 +41,22 @@ body {
   @apply bg-amber-100 text-amber-700;
 }
 
+.badge-cam {
+  @apply bg-cyan-100 text-cyan-700;
+}
+
+.badge-harita {
+  @apply bg-emerald-100 text-emerald-700;
+}
+
+.badge-mobilya {
+  @apply bg-rose-100 text-rose-700;
+}
+
+.badge-default {
+  @apply bg-gray-100 text-gray-700;
+}
+
 /* Alan değeri highlight */
 .alan-value {
   @apply font-mono text-blue-700 bg-blue-50 px-2 py-0.5 rounded;

@@ -31,6 +31,7 @@ from database import (
     sync_cost_definitions_from_template, list_cost_definitions,
     canonicalize_kaplama_cost_name, normalize_legacy_gold_silver_names,
     deactivate_shadowed_kaplama_base_names,
+    normalize_product_categories, get_supported_categories,
     DB_BACKEND, DATABASE_URL,
     IntegrityError as DBIntegrityError,
 )
@@ -38,6 +39,7 @@ from models import (
     ProductResponse, RawMaterialResponse, RawMaterialUpdate, RawMaterialCreate,
     ProductMaterialEntry, ProductMaterialBulk, ProductCostAssignment,
     ExportRequest, StatsResponse, ParentInheritanceRequest,
+    ProductSyncRequest,
     CostDefinitionCreate, CostDefinitionUpdate,
     AuthLoginRequest, AuthChangePasswordRequest, AuthUserCreate, AuthUserUpdate,
 )
@@ -77,6 +79,7 @@ def parse_cors_origins() -> list[str]:
 
 ALLOWED_CORS_ORIGINS = parse_cors_origins()
 ENABLE_RELOAD_DB = env_flag("ENABLE_RELOAD_DB", default=not IS_PRODUCTION)
+ENABLE_PRODUCT_SYNC = env_flag("ENABLE_PRODUCT_SYNC", default=True)
 SEED_DEFAULT_USERS = env_flag("SEED_DEFAULT_USERS", default=True)
 ENABLE_STARTUP_DATA_BOOTSTRAP = env_flag("ENABLE_STARTUP_DATA_BOOTSTRAP", default=not IS_PRODUCTION)
 ENABLE_STARTUP_TEMPLATE_SYNC = env_flag("ENABLE_STARTUP_TEMPLATE_SYNC", default=not IS_PRODUCTION)
@@ -131,6 +134,7 @@ ADMIN_ONLY_RULES: list[tuple[str, str]] = [
     ("PUT", "/api/cost-definitions/"),
     ("DELETE", "/api/cost-definitions/"),
     ("POST", "/api/reload-db"),
+    ("POST", "/api/sync-products"),
     ("GET", "/api/auth/users"),
     ("POST", "/api/auth/users"),
     ("PUT", "/api/auth/users/"),
@@ -737,6 +741,8 @@ def health_check():
         "app_env": APP_ENV,
         "has_database_url": bool(DATABASE_URL),
         "seed_default_users": SEED_DEFAULT_USERS,
+        "enable_product_sync": ENABLE_PRODUCT_SYNC,
+        "supported_categories": get_supported_categories(),
         "cors_origins": ALLOWED_CORS_ORIGINS,
     }
     if _startup_error:
@@ -2322,6 +2328,41 @@ def template_structure():
 
 
 # ─────────────────────────── DB MANAGEMENT ───────────────────────────
+
+@app.post("/api/sync-products")
+def sync_products(data: ProductSyncRequest, request: Request):
+    """
+    Parent-child listelerini kategori bazlı günceller.
+    - categories boş ise tüm kategoriler
+    - replace_existing=true ise seçili kategorilerin eski ürünleri silinip yeniden yüklenir
+    """
+    if not ENABLE_PRODUCT_SYNC:
+        raise HTTPException(status_code=403, detail="sync-products bu ortamda kapalı")
+
+    admin = require_admin_user(request)
+    try:
+        categories = normalize_product_categories(data.categories)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    loaded = load_mapped_products(categories=categories, replace_existing=bool(data.replace_existing))
+    write_audit_log(
+        admin,
+        "products.sync",
+        details={
+            "categories": categories,
+            "replace_existing": bool(data.replace_existing),
+            "products_loaded": loaded,
+            "supported_categories": get_supported_categories(),
+        },
+    )
+    return {
+        "status": "ok",
+        "categories": categories,
+        "replace_existing": bool(data.replace_existing),
+        "products_loaded": loaded,
+    }
+
 
 @app.post("/api/reload-db")
 def reload_database(request: Request):
