@@ -349,30 +349,32 @@ def row_first_value(row):
 
 def get_user_by_username(username: str):
     conn = get_db()
-    row = conn.execute(
-        """
-        SELECT id, username, password_hash, role, is_active, created_at, updated_at
-        FROM users
-        WHERE lower(username) = lower(?)
-        """,
-        (username,),
-    ).fetchone()
-    conn.close()
-    return row
+    try:
+        return conn.execute(
+            """
+            SELECT id, username, password_hash, role, is_active, created_at, updated_at
+            FROM users
+            WHERE lower(username) = lower(?)
+            """,
+            (username,),
+        ).fetchone()
+    finally:
+        conn.close()
 
 
 def get_user_by_id(user_id: int):
     conn = get_db()
-    row = conn.execute(
-        """
-        SELECT id, username, password_hash, role, is_active, created_at, updated_at
-        FROM users
-        WHERE id = ?
-        """,
-        (user_id,),
-    ).fetchone()
-    conn.close()
-    return row
+    try:
+        return conn.execute(
+            """
+            SELECT id, username, password_hash, role, is_active, created_at, updated_at
+            FROM users
+            WHERE id = ?
+            """,
+            (user_id,),
+        ).fetchone()
+    finally:
+        conn.close()
 
 
 def write_audit_log(user: dict | None, action: str, target: str | None = None, details: dict | None = None):
@@ -745,7 +747,14 @@ def login(data: AuthLoginRequest):
     if not username or not data.password:
         raise HTTPException(status_code=400, detail="Kullanıcı adı ve parola zorunlu")
 
-    user_row = get_user_by_username(username)
+    try:
+        user_row = get_user_by_username(username)
+    except Exception:
+        logger.exception("Login sırasında veritabanından kullanıcı çekilemedi: username=%s", username)
+        raise HTTPException(
+            status_code=503,
+            detail="Veritabanına geçici olarak ulaşılamıyor. Lütfen tekrar deneyin.",
+        )
     if not user_row:
         raise HTTPException(status_code=401, detail="Kullanıcı adı veya parola hatalı")
     if not bool(user_row["is_active"]):

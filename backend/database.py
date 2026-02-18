@@ -8,6 +8,7 @@ import sqlite3
 import csv
 import re
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -15,10 +16,12 @@ try:
     import psycopg2
     from psycopg2.extras import RealDictCursor
     from psycopg2 import IntegrityError as PgIntegrityError
+    from psycopg2.pool import ThreadedConnectionPool
 except Exception:
     psycopg2 = None
     RealDictCursor = None
     PgIntegrityError = None
+    ThreadedConnectionPool = None
 
 # Vercel ortamında psycopg2 yoksa psycopg (v3) compat katmanını dene
 if psycopg2 is None:
@@ -52,6 +55,54 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_BACKEND = "postgres" if DATABASE_URL.startswith(("postgres://", "postgresql://")) else "sqlite"
 IS_POSTGRES = DB_BACKEND == "postgres"
 IntegrityError = PgIntegrityError if IS_POSTGRES and PgIntegrityError else sqlite3.IntegrityError
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+PG_POOL_ENABLED = _env_flag("PG_POOL_ENABLED", default=True)
+PG_POOL_MIN_CONN = max(1, int(os.getenv("PG_POOL_MIN_CONN", "1")))
+PG_POOL_MAX_CONN = max(PG_POOL_MIN_CONN, int(os.getenv("PG_POOL_MAX_CONN", "3")))
+PG_CONNECT_TIMEOUT = max(2, int(os.getenv("PG_CONNECT_TIMEOUT", "10")))
+_pg_pool = None
+_pg_pool_lock = threading.Lock()
+
+
+def _get_or_create_pg_pool():
+    """
+    Supabase pooler önünde bile local process içinde bağlantı reuse etmek
+    serverless connection spike'larını azaltır.
+    """
+    global _pg_pool
+    if not (IS_POSTGRES and PG_POOL_ENABLED and ThreadedConnectionPool is not None):
+        return None
+    if _pg_pool is not None:
+        return _pg_pool
+    with _pg_pool_lock:
+        if _pg_pool is None:
+            _pg_pool = ThreadedConnectionPool(
+                minconn=PG_POOL_MIN_CONN,
+                maxconn=PG_POOL_MAX_CONN,
+                dsn=DATABASE_URL,
+                connect_timeout=PG_CONNECT_TIMEOUT,
+            )
+    return _pg_pool
+
+
+def close_pg_pool():
+    """İhtiyaç halinde tüm pooled bağlantıları kapatır."""
+    global _pg_pool
+    with _pg_pool_lock:
+        pool = _pg_pool
+        _pg_pool = None
+    if pool is not None:
+        pool.closeall()
+
+
 KATEGORI_ROOT = Path(__file__).parent.parent.parent  # kategori_calismasi root
 
 KATEGORI_DIRS = {
@@ -137,8 +188,10 @@ class PGCompatCursor:
 
 
 class PGCompatConnection:
-    def __init__(self, inner):
+    def __init__(self, inner, pool=None):
         self._inner = inner
+        self._pool = pool
+        self._is_closed = False
 
     def cursor(self):
         if RealDictCursor is not None:
@@ -157,7 +210,37 @@ class PGCompatConnection:
         return self._inner.rollback()
 
     def close(self):
-        return self._inner.close()
+        if self._is_closed:
+            return None
+        if self._pool is not None:
+            # Broken transaction state'in pool'a geri dönmesini engelle.
+            try:
+                self._inner.rollback()
+            except Exception:
+                pass
+            self._pool.putconn(self._inner)
+        else:
+            self._inner.close()
+        self._is_closed = True
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if exc_type is not None:
+            try:
+                self.rollback()
+            except Exception:
+                pass
+        self.close()
+        return False
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
@@ -236,7 +319,20 @@ def get_db():
     if IS_POSTGRES:
         if psycopg2 is None:
             raise RuntimeError("PostgreSQL için 'psycopg2-binary' veya 'psycopg' kurulmalı.")
-        raw_conn = psycopg2.connect(DATABASE_URL)
+        pool = _get_or_create_pg_pool()
+        if pool is not None:
+            raw_conn = pool.getconn()
+            try:
+                raw_conn.autocommit = False
+            except Exception:
+                pass
+            return PGCompatConnection(raw_conn, pool=pool)
+
+        try:
+            raw_conn = psycopg2.connect(DATABASE_URL, connect_timeout=PG_CONNECT_TIMEOUT)
+        except TypeError:
+            # psycopg3 compat wrapper sadece dsn parametresi alıyor.
+            raw_conn = psycopg2.connect(DATABASE_URL)
         try:
             raw_conn.autocommit = False
         except Exception:

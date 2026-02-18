@@ -56,7 +56,8 @@ Varsayilan local URL'ler:
 
 Temel alanlar:
 - `APP_ENV=development|production`
-- `DATABASE_URL=` (PostgreSQL icin production'da zorunlu, Supabase URI kullanabilirsiniz)
+- `DATABASE_URL=` (PostgreSQL icin production'da zorunlu)
+  - Vercel/serverless + Supabase icin `db.<ref>.supabase.co:5432` yerine `pooler.supabase.com:6543` (Transaction Pooler) URL kullanin.
 - `AUTH_SECRET=` (production'da guclu ve min 32 karakter)
 - `CORS_ORIGINS=https://app.example.com`
 - `ENABLE_RELOAD_DB=false`
