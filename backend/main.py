@@ -1709,6 +1709,213 @@ def set_product_cost(entry: ProductCostAssignment, request: Request):
 
 # ─────────────────────── PARENT-TO-CHILD INHERITANCE ───────────────────────
 
+def _material_flags(name: str | None) -> tuple[bool, bool, bool, bool]:
+    folded = str(name or "").strip().casefold()
+    boya_iscilik_token = "işçilik".casefold()
+    is_strafor = "strafor" in folded
+    is_boya_iscilik = "boya" in folded and (boya_iscilik_token in folded or "iscilik" in folded)
+    is_sac = folded.startswith("saç".casefold()) or folded.startswith("sac")
+    is_mdf = folded.startswith("mdf")
+    return is_strafor, is_boya_iscilik, is_sac, is_mdf
+
+
+@app.get("/api/inherit/prefill")
+def get_parent_inheritance_prefill(parent_name: str):
+    """
+    Parent Inheritance ekranı için mevcut atamaları form formatında döndürür.
+    Böylece daha önce yapılmış aktarım "boş ekran" yerine prefill gelir.
+    """
+    conn = get_db()
+    try:
+        children = conn.execute(
+            """
+            SELECT child_sku, child_name, variation_size, variation_color, alan_m2, kargo_agirlik, kargo_kodu
+            FROM products
+            WHERE parent_name = ?
+            """,
+            (parent_name,),
+        ).fetchall()
+        if not children:
+            raise HTTPException(status_code=404, detail="Bu parent altında ürün bulunamadı")
+
+        child_by_sku = {row["child_sku"]: dict(row) for row in children}
+        kargo_counter_by_size: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        kaplama_counter_by_name: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        weight_counter_by_size: dict[str, dict[float, int]] = defaultdict(lambda: defaultdict(int))
+
+        for child in children:
+            size = child["variation_size"] or "(boyutsuz)"
+            if child["kargo_agirlik"] is None:
+                continue
+            try:
+                weight = round(float(child["kargo_agirlik"]), 6)
+            except (TypeError, ValueError):
+                continue
+            weight_counter_by_size[size][weight] += 1
+
+        cost_rows = conn.execute(
+            """
+            SELECT pc.child_sku, pc.cost_name, cd.category
+            FROM product_costs pc
+            LEFT JOIN cost_definitions cd ON cd.name = pc.cost_name
+            JOIN products p ON p.child_sku = pc.child_sku
+            WHERE p.parent_name = ? AND pc.assigned = 1
+            """,
+            (parent_name,),
+        ).fetchall()
+
+        for row in cost_rows:
+            sku = row["child_sku"]
+            cost_name = str(row["cost_name"] or "").strip()
+            if not cost_name:
+                continue
+            child = child_by_sku.get(sku)
+            if not child:
+                continue
+
+            size = child["variation_size"] or "(boyutsuz)"
+            category = str(row["category"] or "").strip().lower()
+            is_kargo = category == "kargo" or bool(normalize_kargo_code(cost_name))
+            if is_kargo:
+                kargo_counter_by_size[size][cost_name] += 1
+                continue
+
+            group_name = child["child_name"] or child["child_sku"] or ""
+            tier = detect_kaplama_tier(child["child_name"], child["variation_color"], cost_name)
+            group_key = build_kaplama_group_key(group_name, tier)
+            if group_key:
+                kaplama_counter_by_name[group_key][cost_name] += 1
+
+        fallback_kargo_name_by_code: dict[str, str] = {}
+        for row in conn.execute(
+            """
+            SELECT name, kargo_code
+            FROM cost_definitions
+            WHERE category = 'kargo'
+            """
+        ).fetchall():
+            name = str(row["name"] or "").strip()
+            code = normalize_kargo_code(row["kargo_code"] or row["name"])
+            if not name or not code:
+                continue
+            existing = fallback_kargo_name_by_code.get(code)
+            if not existing or name.casefold() < existing.casefold():
+                fallback_kargo_name_by_code[code] = name
+
+        for child in children:
+            size = child["variation_size"] or "(boyutsuz)"
+            if kargo_counter_by_size.get(size):
+                continue
+            code = normalize_kargo_code(child["kargo_kodu"])
+            if not code:
+                continue
+            fallback_name = fallback_kargo_name_by_code.get(code)
+            if fallback_name:
+                kargo_counter_by_size[size][fallback_name] += 1
+
+        cost_map: dict[str, str] = {}
+        for size, counter in kargo_counter_by_size.items():
+            ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0].casefold()))
+            if ranked:
+                cost_map[size] = ranked[0][0]
+
+        kaplama_name_map: dict[str, list[str]] = {}
+        for group_key, counter in kaplama_counter_by_name.items():
+            ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0].casefold()))
+            names = [name for name, _ in ranked]
+            if names:
+                kaplama_name_map[group_key] = names
+
+        weight_map: dict[str, float] = {}
+        for size, counter in weight_counter_by_size.items():
+            ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+            if ranked:
+                weight_map[size] = ranked[0][0]
+
+        material_rows = conn.execute(
+            """
+            SELECT pm.child_sku, pm.material_id, pm.quantity, rm.name
+            FROM product_materials pm
+            JOIN raw_materials rm ON rm.id = pm.material_id
+            JOIN products p ON p.child_sku = pm.child_sku
+            WHERE p.parent_name = ?
+            """,
+            (parent_name,),
+        ).fetchall()
+
+        sac_presence: dict[int, int] = defaultdict(int)
+        mdf_presence: dict[int, int] = defaultdict(int)
+        sac_area_match: dict[int, int] = defaultdict(int)
+        mdf_area_match: dict[int, int] = defaultdict(int)
+        quantity_by_material: dict[int, dict[float, int]] = defaultdict(lambda: defaultdict(int))
+
+        for row in material_rows:
+            material_id = int(row["material_id"])
+            quantity_raw = row["quantity"]
+            if quantity_raw is None:
+                continue
+            try:
+                quantity = round(float(quantity_raw), 6)
+            except (TypeError, ValueError):
+                continue
+
+            is_strafor, is_boya_iscilik, is_sac, is_mdf = _material_flags(row["name"])
+            child = child_by_sku.get(row["child_sku"])
+            alan = child.get("alan_m2") if child else None
+            try:
+                alan_value = float(alan) if alan is not None else None
+            except (TypeError, ValueError):
+                alan_value = None
+
+            if is_sac:
+                sac_presence[material_id] += 1
+                if alan_value is not None and math.isclose(quantity, alan_value, rel_tol=0, abs_tol=1e-4):
+                    sac_area_match[material_id] += 1
+                continue
+            if is_mdf:
+                mdf_presence[material_id] += 1
+                if alan_value is not None and math.isclose(quantity, alan_value, rel_tol=0, abs_tol=1e-4):
+                    mdf_area_match[material_id] += 1
+                continue
+            if is_strafor or is_boya_iscilik:
+                continue
+
+            quantity_by_material[material_id][quantity] += 1
+
+        def pick_auto_material(match_counter: dict[int, int], presence_counter: dict[int, int]) -> int | None:
+            if match_counter:
+                ranked = sorted(
+                    match_counter.items(),
+                    key=lambda kv: (-kv[1], -presence_counter.get(kv[0], 0), kv[0]),
+                )
+                return ranked[0][0]
+            if len(presence_counter) == 1:
+                return next(iter(presence_counter))
+            return None
+
+        sac_material_id = pick_auto_material(sac_area_match, sac_presence)
+        mdf_material_id = pick_auto_material(mdf_area_match, mdf_presence)
+
+        materials: dict[str, float] = {}
+        for material_id, counter in quantity_by_material.items():
+            ranked = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
+            if ranked:
+                materials[str(material_id)] = ranked[0][0]
+
+        return {
+            "parent_name": parent_name,
+            "cost_map": cost_map,
+            "kaplama_name_map": kaplama_name_map,
+            "weight_map": weight_map,
+            "materials": materials,
+            "sac_material_id": sac_material_id,
+            "mdf_material_id": mdf_material_id,
+            "has_prefill": bool(cost_map or kaplama_name_map or weight_map or materials),
+        }
+    finally:
+        conn.close()
+
+
 @app.post("/api/inherit")
 def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
     """

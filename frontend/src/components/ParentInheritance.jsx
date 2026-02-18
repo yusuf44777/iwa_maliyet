@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   getProductGroups, getProducts, getMaterials, getCostDefinitions,
-  getKargoOptions, getKaplamaNameSuggestions, applyInheritance, exportExcel,
+  getKargoOptions, getKaplamaNameSuggestions, applyInheritance, exportExcel, getInheritancePrefill,
 } from '../api';
 import toast from 'react-hot-toast';
 import {
@@ -147,6 +147,69 @@ export default function ParentInheritance({ onRefresh }) {
       page_size: 500,
     }).then(data => setChildren(data.products))
       .catch(() => {});
+  }, [selectedGroup]);
+
+  useEffect(() => {
+    if (!selectedGroup?.parent_name) return;
+    let cancelled = false;
+
+    // Yeni parent seçildiğinde önce local state'i temizle, sonra prefill uygula.
+    setResult(null);
+    setCostMap({});
+    setKaplamaMap({});
+    setKaplamaNameMap({});
+    setWeightMap({});
+    setMaterialInputs({});
+    setSelectedSac(null);
+    setSelectedMdf(null);
+
+    getInheritancePrefill(selectedGroup.parent_name)
+      .then((prefill) => {
+        if (cancelled || !prefill) return;
+
+        const nextCostMap = {};
+        for (const [size, costName] of Object.entries(prefill.cost_map || {})) {
+          const normalized = String(costName || '').trim();
+          if (normalized) nextCostMap[size] = normalized;
+        }
+
+        const nextWeightMap = {};
+        for (const [size, weight] of Object.entries(prefill.weight_map || {})) {
+          const normalized = Number(weight);
+          if (Number.isFinite(normalized) && normalized >= 0) nextWeightMap[size] = normalized;
+        }
+
+        const nextKaplamaNameMap = {};
+        for (const [groupKey, names] of Object.entries(prefill.kaplama_name_map || {})) {
+          const normalized = normalizeKaplamaSelection(names);
+          if (normalized.length > 0) nextKaplamaNameMap[groupKey] = normalized;
+        }
+
+        const nextMaterials = {};
+        for (const [materialId, quantity] of Object.entries(prefill.materials || {})) {
+          const normalized = Number(quantity);
+          if (Number.isFinite(normalized)) nextMaterials[materialId] = normalized;
+        }
+
+        const sacId = Number(prefill.sac_material_id);
+        const mdfId = Number(prefill.mdf_material_id);
+
+        setCostMap(nextCostMap);
+        setWeightMap(nextWeightMap);
+        setKaplamaNameMap(nextKaplamaNameMap);
+        setMaterialInputs(nextMaterials);
+        setSelectedSac(Number.isInteger(sacId) && sacId > 0 ? sacId : null);
+        setSelectedMdf(Number.isInteger(mdfId) && mdfId > 0 ? mdfId : null);
+
+        if (prefill.has_prefill) {
+          toast.success('Mevcut maliyet aktarımı yüklendi');
+        }
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+    };
   }, [selectedGroup]);
 
   // ─── Derive unique size groups from children ───

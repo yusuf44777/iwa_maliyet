@@ -86,6 +86,8 @@ export const setProductCost = (data) => api.post('/product-costs', data).then(r 
 
 // ─── Inheritance ───
 export const applyInheritance = (data) => api.post('/inherit', data).then(r => r.data);
+export const getInheritancePrefill = (parentName) =>
+  api.get('/inherit/prefill', { params: { parent_name: parentName } }).then(r => r.data);
 
 // ─── Export ───
 export const exportExcel = async (skus) => {

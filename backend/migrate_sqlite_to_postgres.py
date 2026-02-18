@@ -13,7 +13,12 @@ import sqlite3
 import sys
 from pathlib import Path
 
-from database import get_db, init_db
+from database import adapt_sql_for_backend, get_db, init_db
+
+try:
+    from psycopg2.extras import execute_batch
+except Exception:
+    execute_batch = None
 
 
 TABLES_IN_ORDER = [
@@ -31,6 +36,11 @@ def load_sqlite_rows(sqlite_conn: sqlite3.Connection, table: str):
     sqlite_conn.row_factory = sqlite3.Row
     rows = sqlite_conn.execute(f"SELECT * FROM {table}").fetchall()
     return [dict(r) for r in rows]
+
+
+def batched(items: list, size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
 
 
 def migrate(sqlite_path: Path):
@@ -51,6 +61,8 @@ def migrate(sqlite_path: Path):
     sqlite_conn = sqlite3.connect(str(sqlite_path))
 
     total = 0
+    batch_size = max(100, int(os.getenv("MIGRATION_BATCH_SIZE", "1000")))
+    print(f"Batch size: {batch_size}")
     for table in TABLES_IN_ORDER:
         rows = load_sqlite_rows(sqlite_conn, table)
         if not rows:
@@ -61,10 +73,23 @@ def migrate(sqlite_path: Path):
         col_sql = ", ".join(cols)
         placeholders = ", ".join(["?"] * len(cols))
         insert_sql = f"INSERT INTO {table} ({col_sql}) VALUES ({placeholders})"
+        insert_sql = adapt_sql_for_backend(insert_sql)
+        values = [tuple(row.get(c) for c in cols) for row in rows]
+        table_total = len(values)
+        inserted = 0
+        cursor = pg.cursor()
+        raw_cursor = getattr(cursor, "_inner", cursor)
 
-        for row in rows:
-            pg.execute(insert_sql, tuple(row.get(c) for c in cols))
-            total += 1
+        for chunk in batched(values, batch_size):
+            if execute_batch is not None:
+                execute_batch(raw_cursor, insert_sql, chunk, page_size=len(chunk))
+            else:
+                raw_cursor.executemany(insert_sql, chunk)
+
+            inserted += len(chunk)
+            total += len(chunk)
+            if inserted == table_total or inserted % batch_size == 0:
+                print(f"  {table}: {inserted}/{table_total}")
 
         # id sequence'leri MAX(id)'ye çek
         if "id" in cols:
@@ -79,9 +104,9 @@ def migrate(sqlite_path: Path):
                 (table,),
             )
 
-        print(f"- {table}: {len(rows)} satır")
+        pg.commit()
+        print(f"- {table}: {table_total} satır")
 
-    pg.commit()
     pg.close()
     sqlite_conn.close()
     print(f"✅ Migration tamamlandı. Toplam {total} satır taşındı.")
