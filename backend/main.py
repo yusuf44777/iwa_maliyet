@@ -32,7 +32,7 @@ from database import (
     get_db, init_db, load_mapped_products, load_default_materials, load_cost_names,
     sync_cost_definitions_from_template, list_cost_definitions,
     canonicalize_kaplama_cost_name, normalize_legacy_gold_silver_names,
-    deactivate_shadowed_kaplama_base_names,
+    deactivate_shadowed_kaplama_base_names, deactivate_cus_products,
     normalize_product_categories, get_supported_categories,
     DB_BACKEND, DATABASE_URL,
     IntegrityError as DBIntegrityError,
@@ -143,6 +143,7 @@ ADMIN_ONLY_RULES: list[tuple[str, str]] = [
     ("DELETE", "/api/cost-definitions/"),
     ("POST", "/api/reload-db"),
     ("POST", "/api/sync-products"),
+    ("POST", "/api/products/deactivate-cus"),
     ("GET", "/api/quality/report"),
     ("GET", "/api/approvals"),
     ("POST", "/api/approvals/"),
@@ -821,6 +822,12 @@ def _do_startup():
                 logger.warning(f"[startup] deactivate_shadowed başarısız: {e}")
         else:
             logger.info("[startup] template sync devre dışı (ENABLE_STARTUP_TEMPLATE_SYNC=false)")
+        try:
+            deactivated = deactivate_cus_products()
+            if deactivated:
+                logger.info("[startup] CUS kodlu ürün pasife alındı: %s", deactivated)
+        except Exception as e:
+            logger.warning(f"[startup] deactivate_cus_products başarısız: {e}")
         _startup_done = True
         _startup_error = None
         logger.info("[startup] tamamlandı")
@@ -1292,11 +1299,11 @@ def quality_report(request: Request):
 def get_stats():
     conn = get_db()
     stats = {
-        "total_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products").fetchone()) or 0,
-        "metal_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='metal'").fetchone()) or 0,
-        "ahsap_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='ahsap'").fetchone()) or 0,
-        "products_with_dims": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE en IS NOT NULL AND boy IS NOT NULL").fetchone()) or 0,
-        "products_without_dims": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE en IS NULL OR boy IS NULL").fetchone()) or 0,
+        "total_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "metal_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='metal' AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "ahsap_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='ahsap' AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "products_with_dims": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE en IS NOT NULL AND boy IS NOT NULL AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "products_without_dims": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE (en IS NULL OR boy IS NULL) AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
         "total_materials": row_first_value(conn.execute("SELECT COUNT(*) FROM raw_materials").fetchone()) or 0,
         "materials_with_price": row_first_value(conn.execute("SELECT COUNT(*) FROM raw_materials WHERE unit_price > 0").fetchone()) or 0,
     }
@@ -1313,6 +1320,7 @@ def list_products(
     parent_name: Optional[str] = None,
     product_identifier: Optional[str] = None,
     has_dims: Optional[bool] = None,
+    include_inactive: bool = False,
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
 ):
@@ -1322,6 +1330,8 @@ def list_products(
     where_clauses = []
     params = []
 
+    if not include_inactive:
+        where_clauses.append("COALESCE(is_active, 1) = 1")
     if kategori:
         where_clauses.append("kategori = ?")
         params.append(kategori)
@@ -1367,7 +1377,10 @@ def list_products(
 def get_product(child_sku: str):
     """Tek bir ürünün detaylarını döndürür (hammaddeler dahil)."""
     conn = get_db()
-    product = conn.execute("SELECT * FROM products WHERE child_sku = ?", (child_sku,)).fetchone()
+    product = conn.execute(
+        "SELECT * FROM products WHERE child_sku = ? AND COALESCE(is_active, 1) = 1",
+        (child_sku,),
+    ).fetchone()
     if not product:
         conn.close()
         raise HTTPException(status_code=404, detail="Ürün bulunamadı")
@@ -1400,11 +1413,12 @@ def list_product_groups(kategori: Optional[str] = None):
     Aynı parent (maliyet şablonu satırı) altındaki ürünler aynı hammadde yapısını paylaşır.
     """
     conn = get_db()
-    where_sql = ""
+    where_clauses = ["COALESCE(is_active, 1) = 1"]
     params = []
     if kategori:
-        where_sql = "WHERE kategori = ?"
+        where_clauses.append("kategori = ?")
         params.append(kategori)
+    where_sql = "WHERE " + " AND ".join(where_clauses)
 
     identifier_agg_sql = (
         "STRING_AGG(DISTINCT product_identifier, ',')"
@@ -1708,7 +1722,7 @@ def get_kaplama_suggestions(parent_name: str):
     target_rows = conn.execute("""
         SELECT child_sku, child_name, variation_size, kategori
         FROM products
-        WHERE parent_name = ?
+        WHERE parent_name = ? AND COALESCE(is_active, 1) = 1
     """, (parent_name,)).fetchall()
     if not target_rows:
         conn.close()
@@ -1722,6 +1736,7 @@ def get_kaplama_suggestions(parent_name: str):
         WHERE pc.assigned = 1
           AND cd.category = 'kaplama'
           AND cd.is_active = 1
+          AND COALESCE(p.is_active, 1) = 1
           AND p.parent_name <> ?
     """, (parent_name,)).fetchall()
     conn.close()
@@ -1832,7 +1847,7 @@ def get_kaplama_name_suggestions(parent_name: str):
     target_rows = conn.execute("""
         SELECT child_sku, child_name, variation_size, variation_color, kategori
         FROM products
-        WHERE parent_name = ?
+        WHERE parent_name = ? AND COALESCE(is_active, 1) = 1
     """, (parent_name,)).fetchall()
     if not target_rows:
         conn.close()
@@ -1846,6 +1861,7 @@ def get_kaplama_name_suggestions(parent_name: str):
         WHERE pc.assigned = 1
           AND cd.category = 'kaplama'
           AND cd.is_active = 1
+          AND COALESCE(p.is_active, 1) = 1
           AND p.parent_name <> ?
     """, (parent_name,)).fetchall()
     conn.close()
@@ -2045,7 +2061,7 @@ def get_parent_inheritance_prefill(parent_name: str):
             """
             SELECT child_sku, child_name, variation_size, variation_color, alan_m2, kargo_agirlik, kargo_kodu
             FROM products
-            WHERE parent_name = ?
+            WHERE parent_name = ? AND COALESCE(is_active, 1) = 1
             """,
             (parent_name,),
         ).fetchall()
@@ -2073,7 +2089,7 @@ def get_parent_inheritance_prefill(parent_name: str):
             FROM product_costs pc
             LEFT JOIN cost_definitions cd ON cd.name = pc.cost_name
             JOIN products p ON p.child_sku = pc.child_sku
-            WHERE p.parent_name = ? AND pc.assigned = 1
+            WHERE p.parent_name = ? AND COALESCE(p.is_active, 1) = 1 AND pc.assigned = 1
             """,
             (parent_name,),
         ).fetchall()
@@ -2152,7 +2168,7 @@ def get_parent_inheritance_prefill(parent_name: str):
             FROM product_materials pm
             JOIN raw_materials rm ON rm.id = pm.material_id
             JOIN products p ON p.child_sku = pm.child_sku
-            WHERE p.parent_name = ?
+            WHERE p.parent_name = ? AND COALESCE(p.is_active, 1) = 1
             """,
             (parent_name,),
         ).fetchall()
@@ -2308,7 +2324,7 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
         """
         SELECT child_sku, child_name, alan_m2, variation_size, variation_color
         FROM products
-        WHERE parent_name = ?
+        WHERE parent_name = ? AND COALESCE(is_active, 1) = 1
         """,
         (req.parent_name,)
     ).fetchall()
@@ -2627,7 +2643,10 @@ def export_excel(payload: ExportRequest, request: Request):
 
     products_data = []
     for sku in payload.child_skus:
-        product = conn.execute("SELECT * FROM products WHERE child_sku = ?", (sku,)).fetchone()
+        product = conn.execute(
+            "SELECT * FROM products WHERE child_sku = ? AND COALESCE(is_active, 1) = 1",
+            (sku,),
+        ).fetchone()
         if not product:
             continue
 
@@ -2691,7 +2710,9 @@ def export_excel(payload: ExportRequest, request: Request):
 def export_all(request: Request):
     """Tüm ürünleri export eder."""
     conn = get_db()
-    all_rows = conn.execute("SELECT child_sku FROM products ORDER BY child_sku").fetchall()
+    all_rows = conn.execute(
+        "SELECT child_sku FROM products WHERE COALESCE(is_active, 1) = 1 ORDER BY child_sku"
+    ).fetchall()
     all_skus = [r.get("child_sku") if isinstance(r, dict) else r["child_sku"] for r in all_rows]
     conn.close()
 
@@ -2725,6 +2746,7 @@ def sync_products(data: ProductSyncRequest, request: Request):
         raise HTTPException(status_code=400, detail=str(e))
 
     loaded = load_mapped_products(categories=categories, replace_existing=bool(data.replace_existing))
+    deactivated = deactivate_cus_products()
     write_audit_log(
         admin,
         "products.sync",
@@ -2732,6 +2754,7 @@ def sync_products(data: ProductSyncRequest, request: Request):
             "categories": categories,
             "replace_existing": bool(data.replace_existing),
             "products_loaded": loaded,
+            "cus_deactivated": deactivated,
             "supported_categories": get_supported_categories(),
         },
     )
@@ -2740,6 +2763,24 @@ def sync_products(data: ProductSyncRequest, request: Request):
         "categories": categories,
         "replace_existing": bool(data.replace_existing),
         "products_loaded": loaded,
+        "cus_deactivated": deactivated,
+    }
+
+
+@app.post("/api/products/deactivate-cus")
+def deactivate_cus_products_api(request: Request):
+    """Child_Code'u CUS ile başlayan ürünleri pasife alır."""
+    admin = require_admin_user(request)
+    deactivated = deactivate_cus_products()
+    write_audit_log(
+        admin,
+        "products.deactivate_cus",
+        details={"rule": "child_code startswith CUS", "deactivated": deactivated},
+    )
+    return {
+        "status": "ok",
+        "rule": "child_code startswith CUS",
+        "deactivated": deactivated,
     }
 
 
@@ -2759,13 +2800,18 @@ def reload_database(request: Request):
     conn.close()
 
     count = load_mapped_products()
+    deactivated = deactivate_cus_products()
     load_default_materials()
     sync_cost_definitions_from_template()
     normalize_legacy_gold_silver_names()
     deactivate_shadowed_kaplama_base_names()
     ensure_default_users()
-    write_audit_log(admin, "db.reload", details={"products_loaded": count})
-    return {"status": "ok", "products_loaded": count}
+    write_audit_log(
+        admin,
+        "db.reload",
+        details={"products_loaded": count, "cus_deactivated": deactivated},
+    )
+    return {"status": "ok", "products_loaded": count, "cus_deactivated": deactivated}
 
 
 if __name__ == "__main__":

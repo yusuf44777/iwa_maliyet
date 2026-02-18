@@ -13,6 +13,7 @@ Urun bazli maliyet hesaplama, hammadde/kaplama/kargo yonetimi, parent-child urun
 - Parent altindan child urunlere kalitsal maliyet atama
 - Kaplama ve kargo esleme (manuel + otomatik oneriler)
 - Desi hesabi: `max(en*boy*yukseklik/5000, agirlik)` ve `.5`'e yuvarlama
+- `Child_Code` degeri `CUS` ile baslayan urunleri otomatik pasife alma
 - Rol sistemi (`admin` / `user`)
 - Excel maliyet exportu (sablon bazli)
 
@@ -112,6 +113,14 @@ curl -X POST "$API_BASE/api/sync-products" \
 - `categories` bos birakilirsa tum desteklenen kategoriler senkronize edilir.
 - `replace_existing=true` secili kategorilerin eski urunlerini silip CSV'den yeniden yukler.
 - `mobilya` kategorisi desteklenir.
+- Senkronizasyon cevabinda `cus_deactivated` alani ile pasife alinan `CUS` urun adedi doner.
+
+Manuel CUS pasifleştirme (admin):
+
+```bash
+curl -X POST "$API_BASE/api/products/deactivate-cus" \
+  -H "Authorization: Bearer <ADMIN_TOKEN>"
+```
 
 ## DB Performance Paketi
 

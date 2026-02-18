@@ -165,6 +165,7 @@ PRODUCT_EXTRA_COLUMNS = [
     ("kargo_yukseklik", "REAL"),
     ("kargo_agirlik", "REAL"),
     ("kargo_desi", "REAL"),
+    ("is_active", "INTEGER NOT NULL DEFAULT 1"),
 ]
 
 KARGO_CODE_PATTERN = re.compile(r"([A-Z])\s*-\s*(\d+[A-Z]?)", re.I)
@@ -543,8 +544,10 @@ def ensure_indexes(cursor):
     """Sık erişilen sorgular için index'leri oluşturur."""
     index_sql = [
         "CREATE INDEX IF NOT EXISTS idx_products_kategori ON products(kategori)",
+        "CREATE INDEX IF NOT EXISTS idx_products_is_active ON products(is_active)",
         "CREATE INDEX IF NOT EXISTS idx_products_parent_name ON products(parent_name)",
         "CREATE INDEX IF NOT EXISTS idx_products_parent_kategori ON products(parent_name, kategori)",
+        "CREATE INDEX IF NOT EXISTS idx_products_parent_active ON products(parent_name, is_active)",
         "CREATE INDEX IF NOT EXISTS idx_products_identifier ON products(product_identifier)",
         "CREATE INDEX IF NOT EXISTS idx_products_variation_size ON products(variation_size)",
         "CREATE INDEX IF NOT EXISTS idx_product_materials_child_sku ON product_materials(child_sku)",
@@ -599,6 +602,7 @@ def init_db():
             kargo_yukseklik REAL,
             kargo_agirlik REAL,
             kargo_desi REAL,
+            is_active INTEGER NOT NULL DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -814,6 +818,7 @@ def load_mapped_products(categories: list[str] | None = None, replace_existing: 
 
             en, boy = parse_dims(child_dims) if child_dims else (None, None)
             alan = calculate_alan(en, boy)
+            is_active = 0 if str(child_code or "").strip().upper().startswith("CUS") else 1
             values = (
                 kategori_name,
                 row.get("Parent_ID"),
@@ -830,6 +835,7 @@ def load_mapped_products(categories: list[str] | None = None, replace_existing: 
                 product_identifier,
                 match_score,
                 match_method,
+                is_active,
             )
 
             try:
@@ -839,8 +845,8 @@ def load_mapped_products(categories: list[str] | None = None, replace_existing: 
                         (kategori, parent_id, parent_name, child_sku, child_name,
                          child_code, child_dims, en, boy, alan_m2,
                          variation_size, variation_color, product_identifier,
-                         match_score, match_method)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         match_score, match_method, is_active)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         ON CONFLICT (child_sku) DO UPDATE SET
                             kategori = EXCLUDED.kategori,
                             parent_id = EXCLUDED.parent_id,
@@ -855,7 +861,8 @@ def load_mapped_products(categories: list[str] | None = None, replace_existing: 
                             variation_color = EXCLUDED.variation_color,
                             product_identifier = EXCLUDED.product_identifier,
                             match_score = EXCLUDED.match_score,
-                            match_method = EXCLUDED.match_method
+                            match_method = EXCLUDED.match_method,
+                            is_active = EXCLUDED.is_active
                     """, values)
                 else:
                     cursor.execute("""
@@ -863,8 +870,8 @@ def load_mapped_products(categories: list[str] | None = None, replace_existing: 
                         (kategori, parent_id, parent_name, child_sku, child_name,
                          child_code, child_dims, en, boy, alan_m2,
                          variation_size, variation_color, product_identifier,
-                         match_score, match_method)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         match_score, match_method, is_active)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """, values)
                 total_loaded += 1
             except Exception as e:
@@ -874,6 +881,25 @@ def load_mapped_products(categories: list[str] | None = None, replace_existing: 
     conn.close()
     print(f"✅ Toplam {total_loaded} ürün yüklendi.")
     return total_loaded
+
+
+def deactivate_cus_products() -> int:
+    """
+    Child_Code 'CUS' ile başlayan ürünleri pasife alır.
+    """
+    conn = get_db()
+    cur = conn.execute(
+        """
+        UPDATE products
+        SET is_active = 0
+        WHERE UPPER(TRIM(COALESCE(child_code, ''))) LIKE 'CUS%'
+          AND COALESCE(is_active, 1) <> 0
+        """
+    )
+    conn.commit()
+    affected = int(cur.rowcount or 0) if (cur.rowcount or 0) > 0 else 0
+    conn.close()
+    return affected
 
 
 def load_default_materials():
