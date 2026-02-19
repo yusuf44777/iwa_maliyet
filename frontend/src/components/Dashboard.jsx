@@ -92,10 +92,13 @@ export default function Dashboard({ stats, onRefresh, isAdmin = false }) {
   return (
     <div className="space-y-6">
       {/* Stat Cards */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-4">
         <StatCard icon={Package} label="Toplam Ürün" value={stats.total_products} color="blue" />
         <StatCard icon={Layers} label="Metal Ürünler" value={stats.metal_products} color="slate" />
         <StatCard icon={TreePine} label="Ahşap Ürünler" value={stats.ahsap_products} color="amber" />
+        <StatCard icon={Ruler} label="Cam Ürünler" value={stats.cam_products} color="green" />
+        <StatCard icon={Layers} label="Harita Ürünler" value={stats.harita_products} color="purple" />
+        <StatCard icon={Package} label="Mobilya Ürünler" value={stats.mobilya_products} color="blue" />
         <StatCard icon={Ruler} label="Boyutlu Ürünler" value={stats.products_with_dims}
           sublabel={`${stats.products_without_dims} boyutsuz`} color="green" />
         <StatCard icon={AlertCircle} label="Boyutsuz Ürünler" value={stats.products_without_dims} color="red" />

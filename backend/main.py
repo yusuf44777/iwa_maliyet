@@ -1301,7 +1301,10 @@ def get_stats():
     stats = {
         "total_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE COALESCE(is_active, 1) = 1").fetchone()) or 0,
         "metal_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='metal' AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
-        "ahsap_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='ahsap' AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "ahsap_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori IN ('ahsap', 'ahşap') AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "cam_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='cam' AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "harita_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='harita' AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
+        "mobilya_products": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE kategori='mobilya' AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
         "products_with_dims": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE en IS NOT NULL AND boy IS NOT NULL AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
         "products_without_dims": row_first_value(conn.execute("SELECT COUNT(*) FROM products WHERE (en IS NULL OR boy IS NULL) AND COALESCE(is_active, 1) = 1").fetchone()) or 0,
         "total_materials": row_first_value(conn.execute("SELECT COUNT(*) FROM raw_materials").fetchone()) or 0,

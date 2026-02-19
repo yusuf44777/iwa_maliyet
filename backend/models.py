@@ -140,6 +140,9 @@ class StatsResponse(BaseModel):
     total_products: int
     metal_products: int
     ahsap_products: int
+    cam_products: int
+    harita_products: int
+    mobilya_products: int
     products_with_dims: int
     products_without_dims: int
     total_materials: int
