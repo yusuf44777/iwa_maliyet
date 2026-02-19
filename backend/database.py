@@ -892,9 +892,10 @@ def deactivate_cus_products() -> int:
         """
         UPDATE products
         SET is_active = 0
-        WHERE UPPER(TRIM(COALESCE(child_code, ''))) LIKE 'CUS%'
+        WHERE UPPER(TRIM(COALESCE(child_code, ''))) LIKE ?
           AND COALESCE(is_active, 1) <> 0
-        """
+        """,
+        ("CUS%",),
     )
     conn.commit()
     affected = int(cur.rowcount or 0) if (cur.rowcount or 0) > 0 else 0

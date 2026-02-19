@@ -23,6 +23,10 @@ backend/maliyet.db
 backend/maliyet.db.*
 exports/
 
+# Excel and CSV files
+*.xlsx
+*.csv
+
 # Logs/temp
 *.log
 *.tmp
