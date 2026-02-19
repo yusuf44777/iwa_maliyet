@@ -22,6 +22,51 @@ GOLD_COPPER_TOKENS = {
 }
 
 
+def resolve_export_dir() -> Path:
+    """
+    Export dosyalarının yazılacağı klasörü belirler.
+    Öncelik:
+    1) EXPORT_DIR env
+    2) proje içi exports
+    3) /tmp/maliyet_exports (serverless fallback)
+    """
+    env_dir = os.getenv("EXPORT_DIR", "").strip()
+    candidates: list[Path] = []
+    if env_dir:
+        candidates.append(Path(env_dir).expanduser())
+
+    base_dir = Path(__file__).resolve().parent.parent / "exports"
+    tmp_dir = Path("/tmp/maliyet_exports")
+
+    # Vercel'de /var/task read-only olabilir; /tmp her zaman fallback.
+    if os.getenv("VERCEL"):
+        candidates.extend([tmp_dir, base_dir])
+    else:
+        candidates.extend([base_dir, tmp_dir])
+
+    seen: set[str] = set()
+    deduped: list[Path] = []
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+
+    for candidate in deduped:
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+            probe = candidate / ".write_probe"
+            with open(probe, "wb") as f:
+                f.write(b"")
+            probe.unlink()
+            return candidate
+        except Exception:
+            continue
+
+    raise RuntimeError("Export klasörü oluşturulamadı (yazma izni yok)")
+
+
 def resolve_template_path() -> Path:
     """
     Kullanılacak şablon dosyasını belirler.
@@ -172,9 +217,11 @@ def export_to_template(products: list[dict], output_path: str = None) -> str:
     """
     if output_path is None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_dir = Path(__file__).parent.parent / "exports"
-        output_dir.mkdir(exist_ok=True)
+        output_dir = resolve_export_dir()
         output_path = str(output_dir / f"maliyet_export_{timestamp}.xlsx")
+    else:
+        output_parent = Path(output_path).expanduser().resolve().parent
+        output_parent.mkdir(parents=True, exist_ok=True)
 
     template_path = resolve_template_path()
 

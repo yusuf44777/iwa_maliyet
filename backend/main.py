@@ -7,6 +7,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.responses import JSONResponse
+from starlette.background import BackgroundTask
 from typing import Optional
 import os
 import csv
@@ -570,6 +571,21 @@ def parse_json_text(value):
         return json.loads(str(value))
     except Exception:
         return value
+
+
+def chunk_list(items: list, chunk_size: int) -> list[list]:
+    """Listeyi sabit boyutlu parçalara böler."""
+    if chunk_size <= 0:
+        return [items]
+    return [items[i:i + chunk_size] for i in range(0, len(items), chunk_size)]
+
+
+def safe_unlink(path: str):
+    """Geçici dosyayı sessizce siler."""
+    try:
+        os.remove(path)
+    except Exception:
+        pass
 
 
 def format_approval_row(row):
@@ -1352,6 +1368,7 @@ def list_products(
     page_size: int = Query(50, ge=1, le=500),
 ):
     """Ürünleri listeler, filtreleme ve sayfalama destekler."""
+    started_at = time.perf_counter()
     conn = get_db()
 
     where_clauses = []
@@ -1383,13 +1400,29 @@ def list_products(
 
     # Data
     offset = (page - 1) * page_size
+    order_sql = "kategori, product_identifier, child_sku"
+    # Parent detay ekranında en sık kullanılan senaryo: tek parent altında child listesi
+    # Bu senaryoda child_sku sıralaması daha hafif ve indeks dostudur.
+    if parent_name and not search and not kategori and not product_identifier:
+        order_sql = "child_sku"
     rows = conn.execute(
-        f"SELECT * FROM products WHERE {where_sql} ORDER BY kategori, product_identifier, child_sku LIMIT ? OFFSET ?",
+        f"SELECT * FROM products WHERE {where_sql} ORDER BY {order_sql} LIMIT ? OFFSET ?",
         params + [page_size, offset]
     ).fetchall()
 
     products = [dict(row) for row in rows]
     conn.close()
+
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "[products] total=%s page=%s size=%s filtered_parent=%s filtered_search=%s duration_ms=%s",
+        total,
+        page,
+        page_size,
+        bool(parent_name),
+        bool(search),
+        elapsed_ms,
+    )
 
     return {
         "total": total,
@@ -1444,6 +1477,7 @@ def list_product_groups(
     Ürünleri parent_name bazında gruplar.
     Aynı parent (maliyet şablonu satırı) altındaki ürünler aynı hammadde yapısını paylaşır.
     """
+    started_at = time.perf_counter()
     conn = get_db()
     where_clauses = ["COALESCE(is_active, 1) = 1"]
     params = []
@@ -1475,7 +1509,15 @@ def list_product_groups(
     """
     total = row_first_value(
         conn.execute(
-            f"SELECT COUNT(*) FROM ({grouped_sql}) grouped",
+            f"""
+            SELECT COUNT(*)
+            FROM (
+                SELECT 1
+                FROM products
+                {where_sql}
+                GROUP BY parent_name, kategori
+            ) grouped_count
+            """,
             params,
         ).fetchone()
     ) or 0
@@ -1491,6 +1533,16 @@ def list_product_groups(
         params + [page_size, offset],
     ).fetchall()
     conn.close()
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "[product-groups] total=%s page=%s size=%s filtered_kategori=%s filtered_search=%s duration_ms=%s",
+        total,
+        page,
+        page_size,
+        bool(kategori),
+        bool(search),
+        elapsed_ms,
+    )
     return {
         "total": total,
         "page": page,
@@ -2741,19 +2793,86 @@ def export_excel(payload: ExportRequest, request: Request):
     """
     Seçilen ürünleri maliyet_sablonu formatında Excel'e export eder.
     """
+    started_at = time.perf_counter()
     user = require_request_user(request)
     conn = get_db()
-
-    products_data = []
-    for sku in payload.child_skus:
-        product = conn.execute(
-            "SELECT * FROM products WHERE child_sku = ? AND COALESCE(is_active, 1) = 1",
-            (sku,),
-        ).fetchone()
-        if not product:
+    query_chunk_size = max(100, int(os.getenv("EXPORT_QUERY_CHUNK_SIZE", "500")))
+    requested_skus: list[str] = []
+    seen_skus: set[str] = set()
+    for raw_sku in payload.child_skus:
+        sku = str(raw_sku or "").strip()
+        if not sku or sku in seen_skus:
             continue
+        seen_skus.add(sku)
+        requested_skus.append(sku)
 
-        p_dict = dict(product)
+    if not requested_skus:
+        conn.close()
+        raise HTTPException(status_code=400, detail="Export için SKU listesi boş")
+
+    products_by_sku: dict[str, dict] = {}
+    materials_by_sku: dict[str, dict[str, float]] = defaultdict(dict)
+    costs_by_sku: dict[str, dict[str, str]] = defaultdict(dict)
+
+    try:
+        # Ürünleri toplu çek (N+1 yerine chunked IN sorguları)
+        for sku_chunk in chunk_list(requested_skus, query_chunk_size):
+            placeholders = ", ".join(["?"] * len(sku_chunk))
+            rows = conn.execute(
+                f"""
+                SELECT child_sku, child_name, variation_color, en, boy,
+                       kargo_en, kargo_boy, kargo_yukseklik, kargo_agirlik, kargo_desi
+                FROM products
+                WHERE COALESCE(is_active, 1) = 1
+                  AND child_sku IN ({placeholders})
+                """,
+                sku_chunk,
+            ).fetchall()
+            for row in rows:
+                product = dict(row)
+                products_by_sku[product["child_sku"]] = product
+
+        found_skus = [sku for sku in requested_skus if sku in products_by_sku]
+
+        if payload.include_materials and found_skus:
+            for sku_chunk in chunk_list(found_skus, query_chunk_size):
+                placeholders = ", ".join(["?"] * len(sku_chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT pm.child_sku, rm.name, pm.quantity
+                    FROM product_materials pm
+                    JOIN raw_materials rm ON pm.material_id = rm.id
+                    WHERE pm.child_sku IN ({placeholders})
+                    """,
+                    sku_chunk,
+                ).fetchall()
+                for row in rows:
+                    mat = dict(row)
+                    materials_by_sku[mat["child_sku"]][mat["name"]] = mat["quantity"]
+
+        if payload.include_costs and found_skus:
+            for sku_chunk in chunk_list(found_skus, query_chunk_size):
+                placeholders = ", ".join(["?"] * len(sku_chunk))
+                rows = conn.execute(
+                    f"""
+                    SELECT child_sku, cost_name
+                    FROM product_costs
+                    WHERE assigned = 1
+                      AND child_sku IN ({placeholders})
+                    """,
+                    sku_chunk,
+                ).fetchall()
+                for row in rows:
+                    cost = dict(row)
+                    costs_by_sku[cost["child_sku"]][cost["cost_name"]] = "x"
+    finally:
+        conn.close()
+
+    products_data: list[dict] = []
+    for sku in requested_skus:
+        p_dict = products_by_sku.get(sku)
+        if not p_dict:
+            continue
         export_item = {
             "child_sku": p_dict["child_sku"],
             "child_name": p_dict["child_name"],
@@ -2764,48 +2883,42 @@ def export_excel(payload: ExportRequest, request: Request):
             "agirlik": p_dict.get("kargo_agirlik"),
             "desi": p_dict.get("kargo_desi"),
         }
-
-        # Hammaddeler
         if payload.include_materials:
-            materials = conn.execute("""
-                SELECT rm.name, pm.quantity
-                FROM product_materials pm
-                JOIN raw_materials rm ON pm.material_id = rm.id
-                WHERE pm.child_sku = ?
-            """, (sku,)).fetchall()
-            export_item["materials"] = {m["name"]: m["quantity"] for m in materials}
-
-        # Maliyetler
+            export_item["materials"] = materials_by_sku.get(sku, {})
         if payload.include_costs:
-            costs = conn.execute(
-                "SELECT cost_name FROM product_costs WHERE child_sku = ? AND assigned = 1",
-                (sku,)
-            ).fetchall()
-            export_item["costs"] = {c["cost_name"]: "x" for c in costs}
-
+            export_item["costs"] = costs_by_sku.get(sku, {})
         products_data.append(export_item)
-
-    conn.close()
 
     if not products_data:
         raise HTTPException(status_code=400, detail="Export edilecek ürün bulunamadı")
 
     output_path = export_to_template(products_data)
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "[export] requested=%s exported=%s include_materials=%s include_costs=%s duration_ms=%s",
+        len(requested_skus),
+        len(products_data),
+        bool(payload.include_materials),
+        bool(payload.include_costs),
+        elapsed_ms,
+    )
     write_audit_log(
         user,
         "export.run",
         target=f"{len(products_data)} ürün",
         details={
-            "requested_skus": len(payload.child_skus),
+            "requested_skus": len(requested_skus),
             "exported_skus": len(products_data),
             "include_materials": bool(payload.include_materials),
             "include_costs": bool(payload.include_costs),
+            "duration_ms": elapsed_ms,
         },
     )
     return FileResponse(
         output_path,
         filename=os.path.basename(output_path),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        background=BackgroundTask(safe_unlink, output_path),
     )
 
 

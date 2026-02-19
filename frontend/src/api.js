@@ -99,12 +99,18 @@ export const exportExcel = async (skus) => {
     child_skus: skus,
     include_materials: true,
     include_costs: true,
-  }, { responseType: 'blob' });
+  }, {
+    responseType: 'blob',
+    timeout: 120000,
+  });
 
   const url = window.URL.createObjectURL(new Blob([response.data]));
   const link = document.createElement('a');
+  const contentDisposition = response.headers?.['content-disposition'] || '';
+  const filenameMatch = /filename=\"?([^\";]+)\"?/i.exec(contentDisposition);
+  const filename = filenameMatch?.[1] || `maliyet_export_${Date.now()}.xlsx`;
   link.href = url;
-  link.setAttribute('download', `maliyet_export_${Date.now()}.xlsx`);
+  link.setAttribute('download', filename);
   document.body.appendChild(link);
   link.click();
   link.remove();
