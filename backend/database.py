@@ -250,7 +250,11 @@ class PGCompatCursor:
         self._inner = inner
 
     def execute(self, sql: str, params=None):
-        self._inner.execute(adapt_sql_for_backend(sql), adapt_params(params))
+        query = adapt_sql_for_backend(sql)
+        if params is None:
+            self._inner.execute(query)
+        else:
+            self._inner.execute(query, adapt_params(params))
         return self
 
     def fetchone(self):
