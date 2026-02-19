@@ -14,12 +14,13 @@ from typing import Any
 
 try:
     import psycopg2
-    from psycopg2.extras import RealDictCursor
+    from psycopg2.extras import RealDictCursor, execute_batch as PgExecuteBatch
     from psycopg2 import IntegrityError as PgIntegrityError
     from psycopg2.pool import ThreadedConnectionPool
 except Exception:
     psycopg2 = None
     RealDictCursor = None
+    PgExecuteBatch = None
     PgIntegrityError = None
     ThreadedConnectionPool = None
 
@@ -39,6 +40,7 @@ if psycopg2 is None:
 
         psycopg2 = _Psycopg3Compat()
         RealDictCursor = None  # psycopg3'te dict_row zaten row_factory olarak set ediliyor
+        PgExecuteBatch = None
         PgIntegrityError = _psycopg3_errors.IntegrityError
     except Exception:
         pass
@@ -68,6 +70,7 @@ PG_POOL_ENABLED = _env_flag("PG_POOL_ENABLED", default=True)
 PG_POOL_MIN_CONN = max(1, int(os.getenv("PG_POOL_MIN_CONN", "1")))
 PG_POOL_MAX_CONN = max(PG_POOL_MIN_CONN, int(os.getenv("PG_POOL_MAX_CONN", "3")))
 PG_CONNECT_TIMEOUT = max(2, int(os.getenv("PG_CONNECT_TIMEOUT", "10")))
+PG_EXECUTEMANY_PAGE_SIZE = max(50, int(os.getenv("PG_EXECUTEMANY_PAGE_SIZE", "500")))
 _pg_pool = None
 _pg_pool_lock = threading.Lock()
 
@@ -257,6 +260,22 @@ class PGCompatCursor:
             self._inner.execute(query, adapt_params(params))
         return self
 
+    def executemany(self, sql: str, seq_of_params):
+        query = adapt_sql_for_backend(sql)
+        adapted_params = [adapt_params(p) for p in (seq_of_params or [])]
+        if not adapted_params:
+            return self
+        if IS_POSTGRES and PgExecuteBatch is not None:
+            PgExecuteBatch(
+                self._inner,
+                query,
+                adapted_params,
+                page_size=PG_EXECUTEMANY_PAGE_SIZE,
+            )
+        else:
+            self._inner.executemany(query, adapted_params)
+        return self
+
     def fetchone(self):
         return self._inner.fetchone()
 
@@ -284,6 +303,11 @@ class PGCompatConnection:
     def execute(self, sql: str, params=None):
         cur = self.cursor()
         cur.execute(sql, params)
+        return cur
+
+    def executemany(self, sql: str, seq_of_params):
+        cur = self.cursor()
+        cur.executemany(sql, seq_of_params)
         return cur
 
     def commit(self):

@@ -69,6 +69,7 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 APP_ENV = (os.getenv("APP_ENV") or os.getenv("ENV") or "development").strip().lower()
 IS_PRODUCTION = APP_ENV in {"prod", "production"}
+IS_VERCEL = env_flag("VERCEL", default=False)
 
 def parse_cors_origins() -> list[str]:
     raw = os.getenv("CORS_ORIGINS", "").strip()
@@ -89,8 +90,16 @@ ENABLE_RELOAD_DB = env_flag("ENABLE_RELOAD_DB", default=not IS_PRODUCTION)
 ENABLE_PRODUCT_SYNC = env_flag("ENABLE_PRODUCT_SYNC", default=True)
 ENABLE_APPROVAL_WORKFLOW = env_flag("ENABLE_APPROVAL_WORKFLOW", default=False)
 SEED_DEFAULT_USERS = env_flag("SEED_DEFAULT_USERS", default=True)
-ENABLE_STARTUP_DATA_BOOTSTRAP = env_flag("ENABLE_STARTUP_DATA_BOOTSTRAP", default=not IS_PRODUCTION)
-ENABLE_STARTUP_TEMPLATE_SYNC = env_flag("ENABLE_STARTUP_TEMPLATE_SYNC", default=not IS_PRODUCTION)
+# Vercel serverless cold-start'ta ağır bootstrap işlemleri timeout'a yol açabileceği için
+# varsayılanı kapatıyoruz. Gerekirse env ile explicit true verilebilir.
+ENABLE_STARTUP_DATA_BOOTSTRAP = env_flag(
+    "ENABLE_STARTUP_DATA_BOOTSTRAP",
+    default=(not IS_PRODUCTION and not IS_VERCEL),
+)
+ENABLE_STARTUP_TEMPLATE_SYNC = env_flag(
+    "ENABLE_STARTUP_TEMPLATE_SYNC",
+    default=(not IS_PRODUCTION and not IS_VERCEL),
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -2309,6 +2318,7 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
        - Strafor  = child.alan_m2 * 1.2
        - Boya + İşçilik = child.alan_m2 * 5
     """
+    started_at = time.perf_counter()
     user = require_request_user(request)
     approval_id = req.approval_id
     approval_context = req.model_dump(mode="json", exclude={"approval_id"})
@@ -2397,8 +2407,26 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
     # Auto-calc material IDs set: skip from manual copy
     auto_ids = {strafor_id, boya_id, sac_id, mdf_id} - {None}
 
-    updated_children = []
-    skipped_children = []
+    manual_material_assignments: list[tuple[int, float]] = []
+    for mat_id_raw, quantity_raw in (req.materials or {}).items():
+        try:
+            mat_id = int(mat_id_raw)
+            quantity = float(quantity_raw)
+        except (TypeError, ValueError):
+            continue
+        # Otomatik hesaplanan materyalleri manuel kalemlerden ayır
+        if mat_id in auto_ids:
+            continue
+        manual_material_assignments.append((mat_id, quantity))
+
+    inherit_detail_limit = max(0, int(os.getenv("INHERIT_RESPONSE_DETAIL_LIMIT", "250")))
+    updated_children_count = 0
+    skipped_children_count = 0
+    updated_children_sample: list[dict] = []
+    skipped_children_sample: list[dict] = []
+    product_updates: list[tuple] = []
+    material_upserts: list[tuple] = []
+    cost_upserts: list[tuple] = []
 
     kaplama_name_map_exact: dict[str, list[str]] = {}
     kaplama_name_map_ci: dict[str, list[str]] = {}
@@ -2445,7 +2473,9 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
             # Try to find a fallback: if cost_map has a "*" / default key
             kargo_cost_name = req.cost_map.get("*")
         if not kargo_cost_name:
-            skipped_children.append({"child_sku": sku, "variation_size": size, "reason": "no kargo mapping"})
+            skipped_children_count += 1
+            if inherit_detail_limit > 0 and len(skipped_children_sample) < inherit_detail_limit:
+                skipped_children_sample.append({"child_sku": sku, "variation_size": size, "reason": "no kargo mapping"})
             continue
 
         # Resolve kaplama cost_name list:
@@ -2491,7 +2521,9 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
                 kaplama_cost_names = kaplama_source_map.get("*", [])
         if not kaplama_cost_names:
             if not bool(req.allow_missing_kaplama):
-                skipped_children.append({"child_sku": sku, "variation_size": size, "reason": "no kaplama mapping"})
+                skipped_children_count += 1
+                if inherit_detail_limit > 0 and len(skipped_children_sample) < inherit_detail_limit:
+                    skipped_children_sample.append({"child_sku": sku, "variation_size": size, "reason": "no kaplama mapping"})
                 continue
 
         # Resolve cargo weight for this child's size via weight_map
@@ -2499,15 +2531,21 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
         if kargo_agirlik is None:
             kargo_agirlik = req.weight_map.get("*")
         if kargo_agirlik is None:
-            skipped_children.append({"child_sku": sku, "variation_size": size, "reason": "no weight mapping"})
+            skipped_children_count += 1
+            if inherit_detail_limit > 0 and len(skipped_children_sample) < inherit_detail_limit:
+                skipped_children_sample.append({"child_sku": sku, "variation_size": size, "reason": "no weight mapping"})
             continue
         try:
             kargo_agirlik = float(kargo_agirlik)
         except (TypeError, ValueError):
-            skipped_children.append({"child_sku": sku, "variation_size": size, "reason": "invalid weight"})
+            skipped_children_count += 1
+            if inherit_detail_limit > 0 and len(skipped_children_sample) < inherit_detail_limit:
+                skipped_children_sample.append({"child_sku": sku, "variation_size": size, "reason": "invalid weight"})
             continue
         if kargo_agirlik < 0:
-            skipped_children.append({"child_sku": sku, "variation_size": size, "reason": "negative weight"})
+            skipped_children_count += 1
+            if inherit_detail_limit > 0 and len(skipped_children_sample) < inherit_detail_limit:
+                skipped_children_sample.append({"child_sku": sku, "variation_size": size, "reason": "negative weight"})
             continue
 
         kargo_kodu = normalize_kargo_code(kargo_cost_name)
@@ -2517,36 +2555,20 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
         kargo_yukseklik = kargo_meta["kargo_yukseklik"] if kargo_meta else None
         kargo_desi = calculate_kargo_desi(kargo_en, kargo_boy, kargo_yukseklik, kargo_agirlik)
 
-        conn.execute("""
-            UPDATE products
-            SET kargo_kodu = ?,
-                kargo_en = ?,
-                kargo_boy = ?,
-                kargo_yukseklik = ?,
-                kargo_agirlik = ?,
-                kargo_desi = ?
-            WHERE child_sku = ?
-        """, (
+        rounded_agirlik = round(kargo_agirlik, 6)
+        product_updates.append((
             kargo_kodu,
             kargo_en,
             kargo_boy,
             kargo_yukseklik,
-            round(kargo_agirlik, 6),
+            rounded_agirlik,
             kargo_desi,
             sku,
         ))
 
         # 1) Inherit base materials
-        for mat_id_str, quantity in req.materials.items():
-            mat_id = int(mat_id_str)
-            # Skip auto-calculated materials
-            if mat_id in auto_ids:
-                continue
-            conn.execute("""
-                INSERT INTO product_materials (child_sku, material_id, quantity)
-                VALUES (?, ?, ?)
-                ON CONFLICT(child_sku, material_id) DO UPDATE SET quantity = ?
-            """, (sku, mat_id, quantity, quantity))
+        for mat_id, quantity in manual_material_assignments:
+            material_upserts.append((sku, mat_id, quantity, quantity))
 
         # 2) Flag kargo + kaplama cost categories for this size
         assigned_costs = [kargo_cost_name, *kaplama_cost_names]
@@ -2559,11 +2581,7 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
             if key in seen_assigned:
                 continue
             seen_assigned.add(key)
-            conn.execute("""
-                INSERT INTO product_costs (child_sku, cost_name, assigned)
-                VALUES (?, ?, 1)
-                ON CONFLICT(child_sku, cost_name) DO UPDATE SET assigned = 1
-            """, (sku, assigned_cost))
+            cost_upserts.append((sku, assigned_cost))
 
         # 5-6) Auto-calculate area-driven materials
         child_result = {
@@ -2577,7 +2595,7 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
             "kargo_en": kargo_en,
             "kargo_boy": kargo_boy,
             "kargo_yukseklik": kargo_yukseklik,
-            "kargo_agirlik": round(kargo_agirlik, 6),
+            "kargo_agirlik": rounded_agirlik,
             "kargo_desi": kargo_desi,
             "strafor": None, "boya_iscilik": None, "sac": None, "mdf": None,
         }
@@ -2585,52 +2603,84 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
         if alan is not None:
             if strafor_id is not None:
                 strafor_qty = round(alan * 1.2, 6)
-                conn.execute("""
-                    INSERT INTO product_materials (child_sku, material_id, quantity)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(child_sku, material_id) DO UPDATE SET quantity = ?
-                """, (sku, strafor_id, strafor_qty, strafor_qty))
+                material_upserts.append((sku, strafor_id, strafor_qty, strafor_qty))
                 child_result["strafor"] = strafor_qty
 
             if boya_id is not None:
                 boya_qty = round(alan * 5, 6)
-                conn.execute("""
-                    INSERT INTO product_materials (child_sku, material_id, quantity)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(child_sku, material_id) DO UPDATE SET quantity = ?
-                """, (sku, boya_id, boya_qty, boya_qty))
+                material_upserts.append((sku, boya_id, boya_qty, boya_qty))
                 child_result["boya_iscilik"] = boya_qty
 
             if sac_id is not None:
                 sac_qty = round(alan, 6)  # Saç = Alan
-                conn.execute("""
-                    INSERT INTO product_materials (child_sku, material_id, quantity)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(child_sku, material_id) DO UPDATE SET quantity = ?
-                """, (sku, sac_id, sac_qty, sac_qty))
+                material_upserts.append((sku, sac_id, sac_qty, sac_qty))
                 child_result["sac"] = sac_qty
 
             if mdf_id is not None:
                 mdf_qty = round(alan, 6)  # MDF = Alan
-                conn.execute("""
-                    INSERT INTO product_materials (child_sku, material_id, quantity)
-                    VALUES (?, ?, ?)
-                    ON CONFLICT(child_sku, material_id) DO UPDATE SET quantity = ?
-                """, (sku, mdf_id, mdf_qty, mdf_qty))
+                material_upserts.append((sku, mdf_id, mdf_qty, mdf_qty))
                 child_result["mdf"] = mdf_qty
 
-        updated_children.append(child_result)
+        updated_children_count += 1
+        if inherit_detail_limit > 0 and len(updated_children_sample) < inherit_detail_limit:
+            updated_children_sample.append(child_result)
+
+    if product_updates:
+        conn.executemany(
+            """
+            UPDATE products
+            SET kargo_kodu = ?,
+                kargo_en = ?,
+                kargo_boy = ?,
+                kargo_yukseklik = ?,
+                kargo_agirlik = ?,
+                kargo_desi = ?
+            WHERE child_sku = ?
+            """,
+            product_updates,
+        )
+
+    if material_upserts:
+        conn.executemany(
+            """
+            INSERT INTO product_materials (child_sku, material_id, quantity)
+            VALUES (?, ?, ?)
+            ON CONFLICT(child_sku, material_id) DO UPDATE SET quantity = ?
+            """,
+            material_upserts,
+        )
+
+    if cost_upserts:
+        conn.executemany(
+            """
+            INSERT INTO product_costs (child_sku, cost_name, assigned)
+            VALUES (?, ?, 1)
+            ON CONFLICT(child_sku, cost_name) DO UPDATE SET assigned = 1
+            """,
+            cost_upserts,
+        )
 
     conn.commit()
     conn.close()
+    elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+    logger.info(
+        "[inherit.apply] parent=%s updated=%s skipped=%s product_updates=%s material_upserts=%s cost_upserts=%s duration_ms=%s",
+        req.parent_name,
+        updated_children_count,
+        skipped_children_count,
+        len(product_updates),
+        len(material_upserts),
+        len(cost_upserts),
+        elapsed_ms,
+    )
     write_audit_log(
         user,
         "inherit.apply",
         target=req.parent_name,
         details={
             "parent_name": req.parent_name,
-            "children_updated": len(updated_children),
-            "children_skipped": len(skipped_children),
+            "children_updated": updated_children_count,
+            "children_skipped": skipped_children_count,
             "materials_count": len(req.materials or {}),
             "size_cost_map_count": len(req.cost_map or {}),
             "size_kaplama_map_count": len(req.kaplama_map or {}),
@@ -2654,8 +2704,8 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
                 (
                     json.dumps(
                         {
-                            "children_updated": len(updated_children),
-                            "children_skipped": len(skipped_children),
+                            "children_updated": updated_children_count,
+                            "children_skipped": skipped_children_count,
                             "parent_name": req.parent_name,
                         },
                         ensure_ascii=False,
@@ -2675,10 +2725,12 @@ def apply_parent_inheritance(req: ParentInheritanceRequest, request: Request):
         "kaplama_map": req.kaplama_map,
         "kaplama_name_map": req.kaplama_name_map,
         "allow_missing_kaplama": bool(req.allow_missing_kaplama),
-        "children_updated": len(updated_children),
-        "children_skipped": len(skipped_children),
-        "details": updated_children,
-        "skipped": skipped_children,
+        "children_updated": updated_children_count,
+        "children_skipped": skipped_children_count,
+        "details": updated_children_sample,
+        "details_truncated": max(0, updated_children_count - len(updated_children_sample)),
+        "skipped": skipped_children_sample,
+        "skipped_truncated": max(0, skipped_children_count - len(skipped_children_sample)),
     }
 
 

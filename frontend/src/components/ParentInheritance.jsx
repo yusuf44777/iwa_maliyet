@@ -1429,6 +1429,11 @@ export default function ParentInheritance({ onRefresh }) {
                     <span className="text-amber-600 ml-2">({result.children_skipped} atlandı)</span>
                   )}
                 </span>
+                {Number(result.details_truncated) > 0 && (
+                  <span className="text-xs text-gray-500">
+                    (Tabloda ilk {result.details?.length || 0} kayıt gösteriliyor, +{result.details_truncated})
+                  </span>
+                )}
               </div>
               <div className="table-container max-h-72 overflow-y-auto">
                 <table>
@@ -1504,6 +1509,11 @@ export default function ParentInheritance({ onRefresh }) {
                       {s.child_sku} — boyut: {s.variation_size || '(boş)'} — {s.reason}
                     </div>
                   ))}
+                  {Number(result.skipped_truncated) > 0 && (
+                    <div className="ml-2 text-amber-600">
+                      +{result.skipped_truncated} atlanan kayıt daha var
+                    </div>
+                  )}
                 </div>
               )}
             </div>
